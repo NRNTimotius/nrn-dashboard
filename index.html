@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>NRN — Dashboard</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
 <style>
@@ -130,6 +131,7 @@ const TABS = [
   { id:'inquiry',   label:'📋 Inquiry',              type:'inquiry' },
   { id:'finance',   label:'💰 Agenda (Finance)',     type:'finance' },
   { id:'marketing', label:'📊 Marketing (Socmed KPI)', type:'marketing' },
+  { id:'laporan',   label:'📄 Laporan',              type:'laporan' },
 ];
 const BR = ['Revolt Industry','Radja Leather','Rove Gifts','Winddam ID'];
 
@@ -142,6 +144,8 @@ let finFilt = { brand:'(Semua)', from:'(Semua)', to:'(Semua)' };
 let finData = null;
 let mktFilt = { brand:'Revolt Industry', month:'(Semua)' };
 let mktData = null;
+let lapFilt = { brand:'Revolt Industry', month: MONTHS[new Date().getMonth()] };
+let lapNotes = { wins:'', losses:'', opportunity:'', problem:'' };
 const cache = {};
 const fmtRp = n => 'Rp ' + (Number(n)||0).toLocaleString('id-ID');
 const fmtNum = n => (Number(n)||0).toLocaleString('id-ID');
@@ -181,6 +185,13 @@ async function load(force){
       if(!mktData.success) throw new Error(mktData.error);
       $('#subInfo').textContent = mktData.rows.length+' laporan';
       renderMarketing();
+    } else if(tab.type==='laporan'){
+      if(force || !agendaData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getAgenda'+PW()); agendaData = await r.json(); }
+      if(force || !finData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getFinanceAll'+PW()); finData = await r.json(); }
+      if(force || !mktData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getMarketingAll'+PW()); mktData = await r.json(); }
+      if(force || !inqData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getInquiryAll'+PW()); inqData = await r.json(); }
+      $('#subInfo').textContent = 'Laporan bulanan';
+      renderLaporan();
     } else {
       if(force) delete cache[tab.sheet];
       if(!cache[tab.sheet]){ const r = await fetch(APPS_SCRIPT_URL+'?action=getSheet&name='+encodeURIComponent(tab.sheet)+PW()); cache[tab.sheet] = await r.json(); }
@@ -431,6 +442,150 @@ function renderMarketing(){
       <tbody>${tb}</tbody></table></div>`;
   $('#mBrand').onchange=e=>{f.brand=e.target.value;renderMarketing();};
   $('#mMonth').onchange=e=>{f.month=e.target.value;renderMarketing();};
+}
+
+/* ===== LAPORAN BULANAN (gabungan) ===== */
+let lapReport = null;
+async function fetchLaporanNotes(brand, month, year){
+  try{
+    const r = await fetch(APPS_SCRIPT_URL+'?action=getReportNotes&brand='+encodeURIComponent(brand)+'&month='+encodeURIComponent(month)+'&year='+year+PW());
+    const j = await r.json();
+    if(j.success) return j.notes;
+  }catch(e){}
+  return { wins:'', losses:'', opportunity:'', problem:'' };
+}
+async function renderLaporan(){
+  const f = lapFilt;
+  const year = (finData && finData.year) || new Date().getFullYear();
+  const mi = MONTHS.indexOf(f.month);
+  const nextM = MONTHS[(mi+1)%12], prevM = MONTHS[(mi+11)%12];
+  const sumK=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
+  const avgK=(a,k)=>a.length?a.reduce((s,x)=>s+(x[k]||0),0)/a.length:0;
+  const vcol=v=>v<=0?'var(--green4)':'var(--red)';
+
+  lapNotes = await fetchLaporanNotes(f.brand, f.month, year);
+
+  // — Agenda —
+  const ag = ((agendaData&&agendaData.detail)||[]).filter(x=>x.brand===f.brand && x.bulan===f.month);
+  const agDone=ag.filter(x=>x.status==='Done').length, agProg=ag.filter(x=>x.status==='On Progress').length, agPlan=ag.length-agDone-agProg;
+
+  // — Sosmed vs bulan lalu —
+  const mkCur=((mktData&&mktData.rows)||[]).filter(r=>r.brand===f.brand && r.month===f.month);
+  const mkPrv=((mktData&&mktData.rows)||[]).filter(r=>r.brand===f.brand && r.month===prevM);
+  const so={reach:sumK(mkCur,'reach'),views:sumK(mkCur,'views'),follows:sumK(mkCur,'follows'),saves:sumK(mkCur,'saves'),er:avgK(mkCur,'avgER'),posts:sumK(mkCur,'posts')};
+  const sp={reach:sumK(mkPrv,'reach'),views:sumK(mkPrv,'views'),follows:sumK(mkPrv,'follows'),saves:sumK(mkPrv,'saves'),er:avgK(mkPrv,'avgER')};
+  const dlt=(c,p,pct)=>{const d=c-p,up=d>=0;const v=pct?((d>=0?'+':'')+d.toFixed(2)+'pp'):((d>=0?'+':'')+fmtNum(Math.round(d)));return `<span style="color:${up?'var(--green4)':'var(--red)'};font-size:12px">${up?'▲':'▼'} ${v}</span>`;};
+
+  // — Anggaran bulan ini & depan —
+  const fnCur=((finData&&finData.rows)||[]).filter(r=>r.brand===f.brand && r.month===f.month);
+  const fnNext=((finData&&finData.rows)||[]).filter(r=>r.brand===f.brand && r.month===nextM);
+  const bud=a=>({est:sumK(a,'est'),proj:sumK(a,'proj'),act:sumK(a,'act')});
+  const bCur=bud(fnCur), bNext=bud(fnNext);
+
+  // — Progres inquiry (brand ini) —
+  const inq=((inqData&&inqData.detail)||[]).filter(x=>x.brand===f.brand);
+  const inqQ=inq.filter(x=>(x.status||'').indexOf('Deal')<0 && (x.status||'').indexOf('Cancel')<0);
+  const inqW=inq.filter(x=>(x.status||'').indexOf('Deal')>=0);
+  const inqL=inq.filter(x=>(x.status||'').indexOf('Cancel')>=0);
+
+  lapReport = { brand:f.brand, month:f.month, year, ag, agDone, agProg, agPlan, so, sp, prevM, bCur, bNext, nextM, inqQ, inqW, inqL };
+
+  const opt=(arr,sel)=>arr.map(v=>`<option ${v===sel?'selected':''}>${v}</option>`).join('');
+  const soRow=(lbl,c,p,pct)=>`<tr><td>${lbl}</td><td class="r num">${pct?p.toFixed(2)+'%':fmtNum(p)}</td><td class="r num">${pct?c.toFixed(2)+'%':fmtNum(c)}</td><td class="r">${dlt(c,p,pct)}</td></tr>`;
+
+  $('#content').innerHTML = `
+    <div class="toolbar">
+      <span class="lbl">Brand</span><select id="lBrand">${opt(BR,f.brand)}</select>
+      <span class="lbl">Bulan</span><select id="lMonth">${opt(MONTHS,f.month)}</select>
+      <span style="flex:1"></span>
+      <button id="lPdf" class="tab">🖨️ PDF</button>
+      <button id="lExcel" class="tab">⬇ Excel</button>
+    </div>
+    <div id="lap-report">
+      <div class="section-title">📄 Laporan Bulanan — ${f.brand} · ${f.month} ${year}</div>
+
+      <div class="section-title">📌 Agenda ${f.month}</div>
+      <div class="brandgrid">
+        <div class="bcard"><h3>Total Agenda</h3><div class="big">${ag.length}</div></div>
+        <div class="bcard"><h3>✓ Done</h3><div class="big" style="color:var(--green4)">${agDone}</div></div>
+        <div class="bcard"><h3>◐ On Progress</h3><div class="big">${agProg}</div></div>
+        <div class="bcard"><h3>○ Planned</h3><div class="big">${agPlan}</div></div>
+      </div>
+      <div class="tablewrap" style="margin-top:10px"><table><thead><tr><th>Card</th><th>Subtask</th><th>Deadline</th><th class="r">Sisa</th><th>Status</th></tr></thead><tbody>${
+        ag.length?ag.map(x=>`<tr><td>${x.card}</td><td>${x.subtask}</td><td>${x.deadline||'—'}</td><td class="r">${x.sisaHari==null?'—':x.sisaHari+' hari'}</td><td>${statusPill(x.status)}</td></tr>`).join(''):'<tr><td colspan="5" class="muted" style="text-align:center;padding:16px">Tidak ada agenda bulan ini.</td></tr>'
+      }</tbody></table></div>
+
+      <div class="section-title">📊 Sosmed ${f.month} vs ${prevM}</div>
+      <div class="tablewrap"><table><thead><tr><th>Metrik</th><th class="r">${prevM}</th><th class="r">${f.month}</th><th class="r">Perubahan</th></tr></thead><tbody>
+        ${soRow('Reach',so.reach,sp.reach,false)}${soRow('Views',so.views,sp.views,false)}${soRow('Follows',so.follows,sp.follows,false)}${soRow('Saves',so.saves,sp.saves,false)}${soRow('Avg ER',so.er,sp.er,true)}
+      </tbody></table></div>
+
+      <div class="section-title">💰 Anggaran ${f.month} & ${nextM}</div>
+      <div class="tablewrap"><table><thead><tr><th>Bulan</th><th class="r">Budget Est.</th><th class="r">Proyeksi</th><th class="r">Aktual</th><th class="r">Var vs Proy</th></tr></thead><tbody>
+        <tr><td><b>${f.month}</b> (ini)</td><td class="r num">${fmtRp(bCur.est)}</td><td class="r num">${fmtRp(bCur.proj)}</td><td class="r num">${fmtRp(bCur.act)}</td><td class="r num" style="color:${vcol(bCur.act-bCur.proj)}">${fmtRp(bCur.act-bCur.proj)}</td></tr>
+        <tr><td><b>${nextM}</b> (depan)</td><td class="r num">${fmtRp(bNext.est)}</td><td class="r num">${fmtRp(bNext.proj)}</td><td class="r num">${fmtRp(bNext.act)}</td><td class="r num" style="color:${vcol(bNext.act-bNext.proj)}">${fmtRp(bNext.act-bNext.proj)}</td></tr>
+      </tbody></table></div>
+
+      <div class="section-title">📋 Progres Inquiry (${f.brand})</div>
+      <div class="brandgrid">
+        <div class="bcard"><h3>Sedang Berjalan (Quotation)</h3><div class="big">${inqQ.length}</div><div class="biglbl">${fmtRp(sumK(inqQ,'nominal'))}</div></div>
+        <div class="bcard"><h3>Masuk (Deal)</h3><div class="big" style="color:var(--green4)">${inqW.length}</div><div class="biglbl">${fmtRp(sumK(inqW,'nominal'))}</div></div>
+        <div class="bcard"><h3>Gagal (Cancel)</h3><div class="big" style="color:var(--red)">${inqL.length}</div><div class="biglbl">${fmtRp(sumK(inqL,'nominal'))}</div></div>
+      </div>
+
+      <div class="section-title">📝 Catatan Kualitatif (manual)</div>
+      <div class="card" style="background:var(--white);border-radius:13px;padding:16px;box-shadow:0 4px 22px rgba(35,40,30,.08)">
+        ${[['nWins','🏆 Wins bulan ini','wins'],['nLosses','⚠️ Losses / kendala','losses'],['nOpp','💡 Opportunity (inquiry/non)','opportunity'],['nProb','🔮 Calon problem bulan depan','problem']].map(([id,lbl,key])=>
+          `<div style="margin-bottom:12px"><label style="font-size:12px;font-weight:700;color:var(--text2);display:block;margin-bottom:4px">${lbl}</label><textarea id="${id}" rows="2" style="width:100%;font-family:inherit;font-size:13px;padding:9px 11px;border:1.5px solid var(--cream2);border-radius:9px;background:var(--cream);color:var(--text);outline:none;resize:vertical">${(lapNotes[key]||'').replace(/</g,'&lt;')}</textarea></div>`
+        ).join('')}
+        <button id="btnSaveNotes" class="tab" style="background:var(--green);color:#fff;border-color:var(--green)">💾 Simpan Catatan</button>
+      </div>
+    </div>`;
+
+  $('#lBrand').onchange=e=>{lapFilt.brand=e.target.value;renderLaporan();};
+  $('#lMonth').onchange=e=>{lapFilt.month=e.target.value;renderLaporan();};
+  $('#btnSaveNotes').onclick=saveLaporanNotes;
+  $('#lExcel').onclick=exportLaporanExcel;
+  $('#lPdf').onclick=printLaporan;
+}
+async function saveLaporanNotes(){
+  const btn=$('#btnSaveNotes'); btn.disabled=true; btn.textContent='Menyimpan…';
+  const payload={ type:'reportNotes', password:BOD_PW, brand:lapFilt.brand, month:lapFilt.month,
+    year:(finData&&finData.year)||new Date().getFullYear(),
+    wins:$('#nWins').value, losses:$('#nLosses').value, opportunity:$('#nOpp').value, problem:$('#nProb').value };
+  try{
+    const r=await fetch(APPS_SCRIPT_URL,{method:'POST',body:JSON.stringify(payload)});
+    const j=await r.json();
+    btn.textContent = j.success ? '✓ Tersimpan' : ('Gagal: '+(j.error||''));
+    if(j.success) lapNotes={wins:payload.wins,losses:payload.losses,opportunity:payload.opportunity,problem:payload.problem};
+  }catch(e){ btn.textContent='Gagal terhubung'; }
+  setTimeout(()=>{ btn.disabled=false; btn.textContent='💾 Simpan Catatan'; },2200);
+}
+function exportLaporanExcel(){
+  if(!lapReport){ return; }
+  const R=lapReport, wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet([
+    {Bagian:'Brand',Nilai:R.brand},{Bagian:'Bulan',Nilai:R.month+' '+R.year},
+    {Bagian:'Agenda Total',Nilai:R.ag.length},{Bagian:'Agenda Done',Nilai:R.agDone},{Bagian:'Agenda On Progress',Nilai:R.agProg},{Bagian:'Agenda Planned',Nilai:R.agPlan},
+    {Bagian:'Reach '+R.month,Nilai:R.so.reach},{Bagian:'Reach '+R.prevM,Nilai:R.sp.reach},
+    {Bagian:'Views '+R.month,Nilai:R.so.views},{Bagian:'Avg ER '+R.month,Nilai:R.so.er.toFixed(2)+'%'},
+    {Bagian:'Anggaran '+R.month+' Proyeksi',Nilai:R.bCur.proj},{Bagian:'Anggaran '+R.month+' Aktual',Nilai:R.bCur.act},
+    {Bagian:'Anggaran '+R.nextM+' Proyeksi',Nilai:R.bNext.proj},
+    {Bagian:'Inquiry Berjalan',Nilai:R.inqQ.length},{Bagian:'Inquiry Deal',Nilai:R.inqW.length},{Bagian:'Inquiry Cancel',Nilai:R.inqL.length},
+    {Bagian:'Wins',Nilai:lapNotes.wins},{Bagian:'Losses',Nilai:lapNotes.losses},{Bagian:'Opportunity',Nilai:lapNotes.opportunity},{Bagian:'Calon Problem',Nilai:lapNotes.problem},
+  ]), 'Ringkasan');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(R.ag.map(x=>({Card:x.card,Subtask:x.subtask,Deadline:x.deadline,'Sisa Hari':x.sisaHari,Status:x.status,PIC:x.pic}))), 'Agenda');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+    R.inqQ.concat(R.inqW,R.inqL).map(x=>({Customer:x.customer,Produk:x.product,Nominal:x.nominal,Status:x.status,PIC:x.salesPic}))), 'Inquiry');
+  XLSX.writeFile(wb, `Laporan_${R.brand}_${R.month}_${R.year}.xlsx`);
+}
+function printLaporan(){
+  const html = $('#lap-report').innerHTML;
+  const w = window.open('', '_blank');
+  w.document.write(`<html><head><title>Laporan ${lapFilt.brand} ${lapFilt.month}</title>
+    <style>body{font-family:Arial,sans-serif;padding:24px;color:#222}table{width:100%;border-collapse:collapse;margin:8px 0}th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:12px}.r{text-align:right}.section-title{font-size:16px;font-weight:700;margin:18px 0 6px;color:#233a2c}.brandgrid{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}.bcard{border:1px solid #ccc;border-radius:8px;padding:10px 14px;min-width:130px}.bcard h3{font-size:11px;color:#666}.big{font-size:22px;font-weight:700}.biglbl{font-size:11px;color:#666}.pill{font-size:10px;padding:2px 7px;border-radius:99px;background:#eee}textarea{width:100%;border:1px solid #ccc;border-radius:6px;padding:8px;font-size:12px}.tab{display:none}.toolbar{display:none}.muted{color:#999}</style>
+    </head><body>${html}</body></html>`);
+  w.document.close(); setTimeout(()=>{ w.print(); }, 300);
 }
 
 /* ===== GENERIC GRID (fallback) ===== */
