@@ -131,6 +131,7 @@ const TABS = [
   { id:'inquiry',   label:'📋 Inquiry',              type:'inquiry' },
   { id:'finance',   label:'💰 Agenda (Finance)',     type:'finance' },
   { id:'marketing', label:'📊 Marketing (Socmed KPI)', type:'marketing' },
+  { id:'agency',    label:'🏢 Agency',               type:'agency' },
   { id:'laporan',   label:'📄 Laporan',              type:'laporan' },
 ];
 const BR = ['Revolt Industry','Radja Leather','Rove Gifts','Winddam ID'];
@@ -145,6 +146,7 @@ let finData = null;
 let finCardSort = 0; // 0=default, 1=asc, -1=desc (kolom Task/Card Rincian)
 let mktFilt = { brand:'Revolt Industry', month:'(Semua)' };
 let mktData = null;
+let agFilt = { brand:'(Semua)', bulan:'(Semua)' };
 let lapFilt = { brand:'Revolt Industry', month: MONTHS[new Date().getMonth()] };
 let lapNotes = { wins:'', losses:'', opportunity:'', problem:'' };
 const cache = {};
@@ -186,6 +188,11 @@ async function load(force){
       if(!mktData.success) throw new Error(mktData.error);
       $('#subInfo').textContent = mktData.rows.length+' laporan';
       renderMarketing();
+    } else if(tab.type==='agency'){
+      if(force || !finData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getFinanceAll'+PW()); finData = await r.json(); }
+      if(!finData.success) throw new Error(finData.error);
+      $('#subInfo').textContent = 'Penggunaan agency';
+      renderAgency();
     } else if(tab.type==='laporan'){
       if(force || !agendaData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getAgenda'+PW()); agendaData = await r.json(); }
       if(force || !finData){ const r = await fetch(APPS_SCRIPT_URL+'?action=getFinanceAll'+PW()); finData = await r.json(); }
@@ -465,6 +472,52 @@ function renderMarketing(){
       <tbody>${tb}</tbody></table></div>`;
   $('#mBrand').onchange=e=>{f.brand=e.target.value;renderMarketing();};
   $('#mMonth').onchange=e=>{f.month=e.target.value;renderMarketing();};
+}
+
+/* ===== AGENCY (penggunaan agency) ===== */
+function renderAgency(){
+  const rows = finData.rows, f = agFilt;
+  const flt = rows.filter(r =>
+    (f.brand==='(Semua)'||r.brand===f.brand) &&
+    (f.bulan==='(Semua)'||r.month===f.bulan));
+  const sum=(arr,k)=>arr.reduce((s,x)=>s+(x[k]||0),0);
+  const foto=sum(flt,'contentPhoto'), video=sum(flt,'contentVideo'), design=sum(flt,'designOutput');
+  const opt=(arr,sel)=>arr.map(v=>`<option ${v===sel?'selected':''}>${v}</option>`).join('');
+  const brandOpts=['(Semua)'].concat(BR), monthOpts=['(Semua)'].concat(MONTHS);
+
+  const cards=`
+    <div class="bcard"><h3>🎬 Tenshi Studio (Foto + Video)</h3><div class="big">${fmtNum(foto+video)}</div>
+      <div class="statrow" style="margin-top:6px"><span class="chip month">📷 ${fmtNum(foto)} Foto</span><span class="chip prog">🎥 ${fmtNum(video)} Video</span></div></div>
+    <div class="bcard"><h3>🎨 Akronim (Design)</h3><div class="big">${fmtNum(design)}</div><div class="biglbl">Design Output</div></div>`;
+
+  const brandsToShow = f.brand==='(Semua)' ? BR : [f.brand];
+  const bRows = brandsToShow.map(b=>{
+    const br=flt.filter(r=>r.brand===b);
+    const p=sum(br,'contentPhoto'),v=sum(br,'contentVideo'),d=sum(br,'designOutput');
+    return `<tr><td><b>${b}</b></td><td class="r num">${fmtNum(p)}</td><td class="r num">${fmtNum(v)}</td><td class="r num">${fmtNum(p+v)}</td><td class="r num">${fmtNum(d)}</td></tr>`;
+  }).join('');
+
+  const byMonth={};
+  flt.forEach(r=>{ (byMonth[r.month]=byMonth[r.month]||[]).push(r); });
+  const mRows=Object.keys(byMonth).sort((a,b)=>MONTHS.indexOf(a)-MONTHS.indexOf(b)).map(m=>{
+    const mr=byMonth[m]; const p=sum(mr,'contentPhoto'),v=sum(mr,'contentVideo'),d=sum(mr,'designOutput');
+    return `<tr><td><b>${m}</b></td><td class="r num">${fmtNum(p)}</td><td class="r num">${fmtNum(v)}</td><td class="r num">${fmtNum(p+v)}</td><td class="r num">${fmtNum(d)}</td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">Belum ada data untuk filter ini.</td></tr>';
+
+  $('#content').innerHTML=`
+    <div class="toolbar">
+      <span class="lbl">Brand</span><select id="aBrand">${opt(brandOpts,f.brand)}</select>
+      <span class="lbl">Bulan</span><select id="aBulan">${opt(monthOpts,f.bulan)}</select>
+    </div>
+    <div class="section-title">🏢 Penggunaan Agency ${finData.year}</div>
+    <div class="muted" style="margin:-4px 0 10px;font-size:12px">Logika: <b>Foto + Video → Tenshi Studio</b> · <b>Design → Akronim</b></div>
+    <div class="brandgrid">${cards}</div>
+    <div class="section-title">🏢 Per Brand</div>
+    <div class="tablewrap"><table><thead><tr><th>Brand</th><th class="r">Foto</th><th class="r">Video</th><th class="r">Tenshi (F+V)</th><th class="r">Design (Akronim)</th></tr></thead><tbody>${bRows}</tbody></table></div>
+    <div class="section-title">📅 Per Bulan</div>
+    <div class="tablewrap"><table><thead><tr><th>Bulan</th><th class="r">Foto</th><th class="r">Video</th><th class="r">Tenshi (F+V)</th><th class="r">Design (Akronim)</th></tr></thead><tbody>${mRows}</tbody></table></div>`;
+  $('#aBrand').onchange=e=>{f.brand=e.target.value;renderAgency();};
+  $('#aBulan').onchange=e=>{f.bulan=e.target.value;renderAgency();};
 }
 
 /* ===== LAPORAN BULANAN (gabungan) ===== */
