@@ -166,7 +166,8 @@ let estOpen = false; // rincian Budget Estimasi per card (klik kartu Estimasi)
 let mktFilt = { brand:'Revolt Industry', month:'(Semua)' };
 let mktData = null;
 let agFilt = { brand:'(Semua)', bulan:'(Semua)' };
-let lapFilt = { brand:'Revolt Industry', month: MONTHS[new Date().getMonth()] };
+const ALL_BRANDS = '(Semua Brand)';
+let lapFilt = { brand:ALL_BRANDS, month: MONTHS[new Date().getMonth()] };
 let lapNotes = { wins:'', losses:'', opportunity:'', problem:'' };
 const cache = {};
 const fmtRp = n => 'Rp ' + (Number(n)||0).toLocaleString('id-ID');
@@ -419,25 +420,35 @@ function buildInsight(D){
   return { sudah:S, perhatian:W, aksi:A };
 }
 
-function insightHtml(D){
-  const R = buildInsight(D);
-  const col = (title,cls,arr,empty) => `
+// Renderer generik kotak insight — dipakai insight per-brand & lintas brand (dashboard).
+function insightBoxHtml(title, headTxt, R, footTxt){
+  const col = (t,cls,arr,empty) => `
     <div class="ins-col ${cls}">
-      <h4>${title} <span class="ins-n">${arr.length}</span></h4>
+      <h4>${t} <span class="ins-n">${arr.length}</span></h4>
       ${arr.length ? '<ul>'+arr.map(f=>`<li><span class="ins-tag">${f.scope}</span> ${f.txt}</li>`).join('')+'</ul>'
                    : `<div class="ins-empty">${empty}</div>`}
     </div>`;
   return `
-    <div class="section-title">🤖 Ringkasan &amp; Saran Otomatis</div>
+    <div class="section-title">${title}</div>
     <div class="ins-box">
-      <div class="ins-head">${D.brand?insEsc(D.brand)+' · ':''}${insEsc(D.month)} — ${R.sudah.length} berjalan baik · ${R.perhatian.length} perlu perhatian · ${R.aksi.length} butuh aksi</div>
+      <div class="ins-head">${headTxt}</div>
       <div class="ins-grid">
         ${col('✅ Sudah jalan','good',R.sudah,'Belum ada capaian yang tercatat bulan ini.')}
         ${col('⚠️ Perlu perhatian','warn',R.perhatian,'Tidak ada.')}
         ${col('🎯 Butuh aksi','act',R.aksi,'Tidak ada yang mendesak.')}
       </div>
-      <div class="ins-foot">Dihitung otomatis dari Agenda, Sosmed, Inquiry &amp; Anggaran dengan ambang tetap — <b>bukan pengganti</b> Analisa Kualitatif di bawah. Sifatnya indikatif; keputusan tetap di brand.</div>
+      <div class="ins-foot">${footTxt}</div>
     </div>`;
+}
+
+function insightHtml(D){
+  const R = buildInsight(D);
+  return insightBoxHtml(
+    '🤖 Ringkasan &amp; Saran Otomatis',
+    `${D.brand?insEsc(D.brand)+' · ':''}${insEsc(D.month)} — ${R.sudah.length} berjalan baik · ${R.perhatian.length} perlu perhatian · ${R.aksi.length} butuh aksi`,
+    R,
+    'Dihitung otomatis dari Agenda, Sosmed, Inquiry &amp; Anggaran dengan ambang tetap — <b>bukan pengganti</b> Analisa Kualitatif di bawah. Sifatnya indikatif; keputusan tetap di brand.'
+  );
 }
 
 /* ===== INQUIRY (rich, filter client-side) ===== */
@@ -707,6 +718,278 @@ function renderAgency(){
 
 /* ===== LAPORAN BULANAN (gabungan) ===== */
 let lapReport = null;
+
+/* ══════════ ANALISA LINTAS BRAND (khusus dashboard BOD) ══════════
+   Membandingkan 4 brand di bulan yang sama. Nilai utamanya: memisahkan
+   masalah SISTEMIK (kena semua brand → kemungkinan faktor platform/pasar)
+   dari masalah BRAND-SPECIFIC (cuma 1 brand → eksekusi brand itu). */
+const XB = { gapConv:15, gapER:1.5, konsentrasi:60, systemic:0.6 };
+
+// Metrik ringkas per brand untuk dibandingkan
+function xbMetrics(D){
+  const agT=D.ag.length;
+  const tot=D.inqAll.length;
+  const pipe=D.inqQuo.concat(D.inqSamp);
+  return {
+    brand:      D.brand,
+    doneRate:   agT ? D.agDone/agT*100 : null,
+    agT:        agT,
+    reachDelta: D.sp.reach ? (D.so.reach-D.sp.reach)/D.sp.reach*100 : null,
+    reach:      D.so.reach,
+    er:         D.so.er || null,
+    erDelta:    (D.so.er && D.sp.er) ? D.so.er-D.sp.er : null,
+    conv:       tot ? D.inqDeal.length/tot*100 : null,
+    inqTot:     tot,
+    pipeRp:     pipe.reduce((s,x)=>s+(x.nominal||0),0),
+    dealRp:     D.inqDeal.reduce((s,x)=>s+(x.nominal||0),0),
+    est:        D.bCur.est, proj:D.bCur.proj, act:D.bCur.act,
+    serapan:    D.bCur.proj ? D.bCur.act/D.bCur.proj*100 : null,
+    kosong:     !agT && !D.so.reach && !tot && !D.bCur.proj,
+  };
+}
+
+// L = [{D, R(buildInsight), M(xbMetrics)}], month = bulan laporan
+function buildCrossInsight(L, month){
+  const S=[], W=[], A=[];
+  const put=(g,scope,txt)=>g.push({scope,txt});
+  const ada = L.filter(x=>!x.M.kosong);
+  const has = (k) => ada.filter(x=>x.M[k]!=null);
+  const best=(k,arr)=>arr.slice().sort((a,b)=>b.M[k]-a.M[k])[0];
+  const worst=(k,arr)=>arr.slice().sort((a,b)=>a.M[k]-b.M[k])[0];
+
+  /* ── Kelengkapan data ── */
+  const kosong = L.filter(x=>x.M.kosong);
+  if(kosong.length)
+    put(A,'Data',`<b>${kosong.length} brand belum ada data ${insEsc(month)}</b> sama sekali: ${kosong.map(x=>insEsc(x.M.brand)).join(', ')}. Laporan portfolio belum utuh.`);
+  if(!ada.length){ return {sudah:S,perhatian:W,aksi:A}; }
+
+  /* ── Sistemik vs brand-specific: Reach ── */
+  const rd = has('reachDelta');
+  if(rd.length >= 2){
+    const turun = rd.filter(x=>x.M.reachDelta < 0);
+    const rasio = turun.length / rd.length;
+    if(rasio >= XB.systemic && turun.length >= 2)
+      put(A,'Sosmed',`<b>Reach turun di ${turun.length}/${rd.length} brand</b> — pola serempak, kemungkinan faktor platform/musiman, bukan salah eksekusi satu brand. Perlu strategi konten level holding.`);
+    else if(turun.length === 1)
+      put(W,'Sosmed',`Reach turun hanya di <b>${insEsc(turun[0].M.brand)}</b> (${Math.round(turun[0].M.reachDelta)}%) sementara brand lain naik — isu spesifik brand itu, bukan platform.`);
+    else if(!turun.length)
+      put(S,'Sosmed',`Reach naik di semua ${rd.length} brand yang ada datanya — momentum portfolio positif.`);
+  }
+
+  /* ── Sistemik vs brand-specific: ER ── */
+  const ed = has('erDelta');
+  if(ed.length >= 2){
+    const turun = ed.filter(x=>x.M.erDelta <= -0.3);
+    if(turun.length/ed.length >= XB.systemic && turun.length >= 2)
+      put(W,'Sosmed',`ER turun di ${turun.length}/${ed.length} brand — engagement melemah menyeluruh, evaluasi format konten lintas brand.`);
+  }
+
+  /* ── Gap ER antar brand ── */
+  const er = has('er');
+  if(er.length >= 2){
+    const b=best('er',er), w=worst('er',er);
+    if(b.M.er - w.M.er >= XB.gapER)
+      put(W,'Sosmed',`Jarak ER lebar: <b>${insEsc(b.M.brand)} ${b.M.er.toFixed(2)}%</b> vs <b>${insEsc(w.M.brand)} ${w.M.er.toFixed(2)}%</b> (beda ${(b.M.er-w.M.er).toFixed(2)}pp). Cek apa yang dilakukan ${insEsc(b.M.brand)} dan tiru ke ${insEsc(w.M.brand)}.`);
+  }
+
+  /* ── Gap konversi antar brand ── */
+  const cv = has('conv');
+  if(cv.length >= 2){
+    const b=best('conv',cv), w=worst('conv',cv);
+    if(b.M.conv - w.M.conv >= XB.gapConv)
+      put(A,'Inquiry',`Jarak konversi lebar: <b>${insEsc(b.M.brand)} ${Math.round(b.M.conv)}%</b> (${b.M.inqTot} inquiry) vs <b>${insEsc(w.M.brand)} ${Math.round(w.M.conv)}%</b> (${w.M.inqTot} inquiry) — beda ${Math.round(b.M.conv-w.M.conv)}pp. Sales process ${insEsc(w.M.brand)} perlu dibedah.`);
+    else
+      put(S,'Inquiry',`Konversi antar brand relatif rata (${Math.round(w.M.conv)}%–${Math.round(b.M.conv)}%) — tidak ada brand yang tertinggal jauh.`);
+  }
+
+  /* ── Anggaran portfolio ── */
+  const tProj=ada.reduce((s,x)=>s+x.M.proj,0), tAct=ada.reduce((s,x)=>s+x.M.act,0), tEst=ada.reduce((s,x)=>s+x.M.est,0);
+  if(tProj){
+    const sp = tAct/tProj*100;
+    if(sp > INS.overspend)      put(A,'Anggaran',`Portfolio overspend: aktual ${fmtRp(tAct)} = <b>${Math.round(sp)}% dari proyeksi</b> ${fmtRp(tProj)}.`);
+    else if(sp < INS.underspend) put(W,'Anggaran',`Serapan portfolio baru ${Math.round(sp)}% (${fmtRp(tAct)} dari ${fmtRp(tProj)}) — banyak rencana belum jalan.`);
+    else                         put(S,'Anggaran',`Serapan portfolio sehat di ${Math.round(sp)}% (${fmtRp(tAct)} dari ${fmtRp(tProj)}).`);
+    // Konsentrasi anggaran
+    const top = best('proj',ada);
+    const share = top.M.proj/tProj*100;
+    if(share >= XB.konsentrasi)
+      put(W,'Anggaran',`<b>${Math.round(share)}% anggaran portfolio terpusat di ${insEsc(top.M.brand)}</b> (${fmtRp(top.M.proj)} dari ${fmtRp(tProj)}) — cek apakah alokasi ini disengaja.`);
+  }
+  const noEst = ada.filter(x=>!x.M.est && x.M.proj);
+  if(noEst.length)
+    put(A,'Anggaran',`${noEst.length} brand jalan tanpa Budget Estimasi: ${noEst.map(x=>insEsc(x.M.brand)).join(', ')} — estimasi terlewat saat bikin agenda.`);
+
+  /* ── Eksekusi agenda antar brand ── */
+  const dr = has('doneRate');
+  if(dr.length >= 2){
+    const b=best('doneRate',dr), w=worst('doneRate',dr);
+    if(w.M.doneRate < INS.doneLow)
+      put(A,'Agenda',`<b>${insEsc(w.M.brand)} paling tertinggal</b>: ${Math.round(w.M.doneRate)}% agenda Done (${w.M.agT} agenda), sementara ${insEsc(b.M.brand)} ${Math.round(b.M.doneRate)}%.`);
+    else if(b.M.doneRate >= INS.doneGood)
+      put(S,'Agenda',`Eksekusi terbaik: <b>${insEsc(b.M.brand)}</b> ${Math.round(b.M.doneRate)}% agenda Done.`);
+  }
+
+  /* ── Pipeline & deal portfolio ── */
+  const tPipe=ada.reduce((s,x)=>s+x.M.pipeRp,0), tDeal=ada.reduce((s,x)=>s+x.M.dealRp,0);
+  if(tPipe) put(S,'Inquiry',`Pipeline portfolio ${fmtRp(tPipe)} masih berjalan; deal masuk ${fmtRp(tDeal)} bulan ini.`);
+
+  /* ── Brand yang paling butuh perhatian ── */
+  const rank = L.slice().sort((a,b)=>b.R.aksi.length-a.R.aksi.length);
+  if(rank[0] && rank[0].R.aksi.length >= 3)
+    put(A,'Prioritas',`<b>${insEsc(rank[0].M.brand)} paling butuh perhatian</b> — ${rank[0].R.aksi.length} item butuh aksi (terbanyak di portfolio). Urutan berikutnya: ${rank.slice(1,3).map(x=>insEsc(x.M.brand)+' ('+x.R.aksi.length+')').join(', ')}.`);
+  const bersih = L.filter(x=>!x.R.aksi.length && !x.M.kosong);
+  if(bersih.length)
+    put(S,'Prioritas',`${bersih.length} brand tanpa item mendesak: ${bersih.map(x=>insEsc(x.M.brand)).join(', ')} — bisa jadi acuan praktik baik.`);
+
+  return {sudah:S, perhatian:W, aksi:A};
+}
+
+// Rakit semua data 1 brand untuk 1 bulan. Dipakai laporan per-brand & portfolio.
+function lapBrandData(brand, month, prevM, nextM){
+  const sumK=(a,k)=>a.reduce((s,x)=>s+(x[k]||0),0);
+  const avgK=(a,k)=>a.length?a.reduce((s,x)=>s+(x[k]||0),0)/a.length:0;
+
+  const ag = ((agendaData&&agendaData.detail)||[]).filter(x=>x.brand===brand && x.bulan===month);
+  const agDone=ag.filter(x=>x.status==='Done').length, agProg=ag.filter(x=>x.status==='On Progress').length, agPlan=ag.length-agDone-agProg;
+
+  const mkCur=((mktData&&mktData.rows)||[]).filter(r=>r.brand===brand && r.month===month);
+  const mkPrv=((mktData&&mktData.rows)||[]).filter(r=>r.brand===brand && r.month===prevM);
+  const so={reach:sumK(mkCur,'reach'),views:sumK(mkCur,'views'),follows:sumK(mkCur,'follows'),saves:sumK(mkCur,'saves'),er:avgK(mkCur,'avgER'),posts:sumK(mkCur,'posts')};
+  const sp={reach:sumK(mkPrv,'reach'),views:sumK(mkPrv,'views'),follows:sumK(mkPrv,'follows'),saves:sumK(mkPrv,'saves'),er:avgK(mkPrv,'avgER')};
+
+  const bud=a=>({est:sumK(a,'est'),proj:sumK(a,'proj'),act:sumK(a,'act')});
+  const bCur=bud(((finData&&finData.rows)||[]).filter(r=>r.brand===brand && r.month===month));
+  const bNext=bud(((finData&&finData.rows)||[]).filter(r=>r.brand===brand && r.month===nextM));
+
+  const inq=((inqData&&inqData.detail)||[]).filter(x=>x.brand===brand);
+  const inqQ=inq.filter(x=>inqKey(x.status)==='quotation');
+  const inqS=inq.filter(x=>inqKey(x.status)==='sampling');
+  const inqW=inq.filter(x=>inqKey(x.status)==='deal');
+  const inqL=inq.filter(x=>inqKey(x.status)==='cancel');
+
+  const insData = { brand, month, prevM, nextM, bCur, bNext, so, sp,
+    ag, agDone, agProg, agLabel: statusLabel,
+    inqAll:inq, inqQuo:inqQ, inqSamp:inqS, inqDeal:inqW, inqCancel:inqL };
+
+  return { ag, agDone, agProg, agPlan, so, sp, bCur, bNext, inq, inqQ, inqS, inqW, inqL, insData };
+}
+
+/* ── View portfolio: ringkasan + perbandingan semua brand ── */
+let lapPortfolio = null;
+function renderPortfolio(month, year, prevM, nextM){
+  const L = BR.map(b=>{
+    const P = lapBrandData(b, month, prevM, nextM);
+    return { brand:b, P, D:P.insData, R:buildInsight(P.insData), M:xbMetrics(P.insData) };
+  });
+  lapPortfolio = { month, year, list:L };
+
+  const T = k => L.reduce((s,x)=>s+(x.M[k]||0),0);
+  const tEst=T('est'), tProj=T('proj'), tAct=T('act'), tPipe=T('pipeRp'), tDeal=T('dealRp');
+  const agTot=L.reduce((s,x)=>s+x.M.agT,0), agDone=L.reduce((s,x)=>s+x.P.agDone,0);
+  const inqTot=L.reduce((s,x)=>s+x.M.inqTot,0), dealN=L.reduce((s,x)=>s+x.P.inqW.length,0);
+  const erVals=L.filter(x=>x.M.er!=null);
+  const avgER=erVals.length?erVals.reduce((s,x)=>s+x.M.er,0)/erVals.length:0;
+  const tReach=L.reduce((s,x)=>s+x.M.reach,0);
+
+  // Sorot nilai terbaik (hijau) & terburuk (merah) per kolom
+  const pick=(k,dir)=>{ const v=L.filter(x=>x.M[k]!=null).map(x=>x.M[k]); if(v.length<2) return [null,null];
+    return dir>0 ? [Math.max(...v), Math.min(...v)] : [Math.min(...v), Math.max(...v)]; };
+  const cell=(val,k,fmt,dir)=>{
+    if(val==null) return '<td class="r muted">—</td>';
+    const [b,w]=pick(k,dir||1);
+    const col = val===b ? 'var(--green4)' : val===w ? 'var(--red)' : '';
+    return `<td class="r num" style="${col?'color:'+col+';font-weight:700':''}">${fmt(val)}</td>`;
+  };
+  const pc=v=>Math.round(v)+'%', pp=v=>v.toFixed(2)+'%', sg=v=>(v>=0?'+':'')+Math.round(v)+'%';
+
+  const rows = L.map(x=>{
+    const M=x.M;
+    if(M.kosong) return `<tr><td><b>${M.brand}</b></td><td colspan="7" class="muted">Belum ada data ${month}</td></tr>`;
+    return `<tr><td><b>${M.brand}</b></td>
+      ${cell(M.doneRate,'doneRate',pc,1)}
+      ${cell(M.reachDelta,'reachDelta',sg,1)}
+      ${cell(M.er,'er',pp,1)}
+      ${cell(M.conv,'conv',pc,1)}
+      <td class="r num">${fmtRp(M.pipeRp)}</td>
+      ${cell(M.serapan,'serapan',pc,-1)}
+      <td class="r num" style="${x.R.aksi.length>=3?'color:var(--red);font-weight:700':''}">${x.R.aksi.length}</td></tr>`;
+  }).join('');
+
+  const X = buildCrossInsight(L, month);
+  const opt=(arr,sel)=>arr.map(v=>`<option ${v===sel?'selected':''}>${v}</option>`).join('');
+
+  $('#content').innerHTML = `
+    <div class="toolbar">
+      <span class="lbl">Brand</span><select id="lBrand">${opt([ALL_BRANDS].concat(BR), ALL_BRANDS)}</select>
+      <span class="lbl">Bulan</span><select id="lMonth">${opt(MONTHS, month)}</select>
+      <span style="flex:1"></span>
+      <button id="lPdf" class="tab">🖨️ PDF</button>
+      <button id="lExcel" class="tab">⬇ Excel</button>
+    </div>
+    <div id="lap-report">
+      <div class="section-title">📄 Laporan Portfolio — Semua Brand · ${month} ${year}</div>
+
+      <div class="brandgrid">
+        <div class="bcard"><h3>Anggaran Proyeksi</h3><div class="big" style="font-size:19px">${fmtRp(tProj)}</div><div class="biglbl">Est ${fmtRp(tEst)}</div></div>
+        <div class="bcard"><h3>Anggaran Aktual</h3><div class="big" style="font-size:19px">${fmtRp(tAct)}</div><div class="biglbl">${tProj?Math.round(tAct/tProj*100):0}% dari proyeksi</div></div>
+        <div class="bcard"><h3>Agenda Done</h3><div class="big">${agDone}/${agTot}</div><div class="biglbl">${agTot?Math.round(agDone/agTot*100):0}% selesai</div></div>
+        <div class="bcard"><h3>Total Reach</h3><div class="big" style="font-size:19px">${fmtNum(tReach)}</div><div class="biglbl">Avg ER ${avgER.toFixed(2)}%</div></div>
+        <div class="bcard"><h3>Inquiry</h3><div class="big">${inqTot}</div><div class="biglbl">${dealN} deal · ${inqTot?Math.round(dealN/inqTot*100):0}% konversi</div></div>
+        <div class="bcard"><h3>Pipeline Berjalan</h3><div class="big" style="font-size:19px">${fmtRp(tPipe)}</div><div class="biglbl">Deal masuk ${fmtRp(tDeal)}</div></div>
+      </div>
+
+      ${insightBoxHtml('🔀 Analisa Lintas Brand',
+         `${month} ${year} — ${X.sudah.length} berjalan baik · ${X.perhatian.length} perlu perhatian · ${X.aksi.length} butuh aksi`,
+         X,
+         'Membandingkan 4 brand di bulan yang sama. Fokusnya memisahkan masalah <b>sistemik</b> (kena banyak brand) dari masalah <b>satu brand</b> — supaya keputusan holding tidak salah sasaran.')}
+
+      <div class="section-title">📊 Perbandingan Brand — ${month}</div>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Brand</th><th class="r">Agenda Done</th><th class="r">Reach vs ${prevM}</th><th class="r">Avg ER</th><th class="r">Konversi</th><th class="r">Pipeline</th><th class="r">Serapan</th><th class="r">Butuh Aksi</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div class="ins-foot"><b style="color:var(--green4)">Hijau</b> = terbaik di kolomnya · <b style="color:var(--red)">Merah</b> = terendah. Serapan dinilai terbalik: makin dekat 100% makin baik, jadi hijau = paling terkendali.</div>
+
+      <div class="section-title">🎯 Item Butuh Aksi per Brand</div>
+      <div class="ins-grid">
+        ${L.map(x=>`<div class="ins-col ${x.R.aksi.length>=3?'act':x.R.aksi.length?'warn':'good'}">
+          <h4>${x.brand} <span class="ins-n">${x.R.aksi.length}</span></h4>
+          ${x.R.aksi.length?'<ul>'+x.R.aksi.map(f=>`<li><span class="ins-tag">${f.scope}</span> ${f.txt}</li>`).join('')+'</ul>'
+                          :'<div class="ins-empty">Tidak ada yang mendesak.</div>'}
+        </div>`).join('')}
+      </div>
+
+      <div class="ins-foot" style="margin-top:14px">Catatan Kualitatif diisi per brand — pilih brand tertentu di dropdown untuk menulis analisanya.</div>
+    </div>`;
+
+  $('#lBrand').onchange=e=>{lapFilt.brand=e.target.value;renderLaporan();};
+  $('#lMonth').onchange=e=>{lapFilt.month=e.target.value;renderLaporan();};
+  $('#lExcel').onclick=exportPortfolioExcel;
+  $('#lPdf').onclick=printLaporan;
+}
+
+function exportPortfolioExcel(){
+  if(!lapPortfolio) return;
+  const {month, year, list:L} = lapPortfolio;
+  const wb=XLSX.utils.book_new();
+  const n=v=>v==null?'':Math.round(v*100)/100;
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(L.map(x=>({
+    Brand:x.brand, 'Agenda Total':x.M.agT, 'Agenda Done %':n(x.M.doneRate),
+    'Reach':x.M.reach, 'Reach Δ %':n(x.M.reachDelta), 'Avg ER %':n(x.M.er),
+    'Inquiry':x.M.inqTot, 'Konversi %':n(x.M.conv), 'Pipeline':x.M.pipeRp, 'Deal Rp':x.M.dealRp,
+    'Est':x.M.est, 'Proyeksi':x.M.proj, 'Aktual':x.M.act, 'Serapan %':n(x.M.serapan),
+    'Butuh Aksi':x.R.aksi.length, 'Perlu Perhatian':x.R.perhatian.length,
+  }))), 'Perbandingan');
+  const X=buildCrossInsight(L, month);
+  const strip=s=>String(s).replace(/<[^>]+>/g,'');
+  const flat=(arr,k)=>arr.map(f=>({Kelompok:k, Lingkup:f.scope, Temuan:strip(f.txt)}));
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+    flat(X.sudah,'Sudah jalan').concat(flat(X.perhatian,'Perlu perhatian'), flat(X.aksi,'Butuh aksi'))), 'Analisa Lintas Brand');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+    L.flatMap(x=>x.R.aksi.map(f=>({Brand:x.brand, Lingkup:f.scope, Aksi:strip(f.txt)})))), 'Aksi per Brand');
+  XLSX.writeFile(wb, `Laporan_Portfolio_${month}_${year}.xlsx`);
+}
+
 async function fetchLaporanNotes(brand, month, year){
   try{
     const r = await fetch(APPS_SCRIPT_URL+'?action=getReportNotes&brand='+encodeURIComponent(brand)+'&month='+encodeURIComponent(month)+'&year='+year+PW());
@@ -724,47 +1007,22 @@ async function renderLaporan(){
   const avgK=(a,k)=>a.length?a.reduce((s,x)=>s+(x[k]||0),0)/a.length:0;
   const vcol=v=>v<=0?'var(--green4)':'var(--red)';
 
+  if(f.brand === ALL_BRANDS){ renderPortfolio(f.month, year, prevM, nextM); return; }
+
   lapNotes = await fetchLaporanNotes(f.brand, f.month, year);
 
-  // — Agenda —
-  const ag = ((agendaData&&agendaData.detail)||[]).filter(x=>x.brand===f.brand && x.bulan===f.month);
-  const agDone=ag.filter(x=>x.status==='Done').length, agProg=ag.filter(x=>x.status==='On Progress').length, agPlan=ag.length-agDone-agProg;
-
-  // — Sosmed vs bulan lalu —
-  const mkCur=((mktData&&mktData.rows)||[]).filter(r=>r.brand===f.brand && r.month===f.month);
-  const mkPrv=((mktData&&mktData.rows)||[]).filter(r=>r.brand===f.brand && r.month===prevM);
-  const so={reach:sumK(mkCur,'reach'),views:sumK(mkCur,'views'),follows:sumK(mkCur,'follows'),saves:sumK(mkCur,'saves'),er:avgK(mkCur,'avgER'),posts:sumK(mkCur,'posts')};
-  const sp={reach:sumK(mkPrv,'reach'),views:sumK(mkPrv,'views'),follows:sumK(mkPrv,'follows'),saves:sumK(mkPrv,'saves'),er:avgK(mkPrv,'avgER')};
+  const P = lapBrandData(f.brand, f.month, prevM, nextM);
+  const { ag, agDone, agProg, agPlan, so, sp, bCur, bNext, inq, inqQ, inqS, inqW, inqL, insData } = P;
   const dlt=(c,p,pct)=>{const d=c-p,up=d>=0;const v=pct?((d>=0?'+':'')+d.toFixed(2)+'pp'):((d>=0?'+':'')+fmtNum(Math.round(d)));return `<span style="color:${up?'var(--green4)':'var(--red)'};font-size:12px">${up?'▲':'▼'} ${v}</span>`;};
 
-  // — Anggaran bulan ini & depan —
-  const fnCur=((finData&&finData.rows)||[]).filter(r=>r.brand===f.brand && r.month===f.month);
-  const fnNext=((finData&&finData.rows)||[]).filter(r=>r.brand===f.brand && r.month===nextM);
-  const bud=a=>({est:sumK(a,'est'),proj:sumK(a,'proj'),act:sumK(a,'act')});
-  const bCur=bud(fnCur), bNext=bud(fnNext);
-
-  // — Progres inquiry (brand ini) —
-  const inq=((inqData&&inqData.detail)||[]).filter(x=>x.brand===f.brand);
-  const inqQ=inq.filter(x=>inqKey(x.status)==='quotation');
-  const inqS=inq.filter(x=>inqKey(x.status)==='sampling');
-  const inqW=inq.filter(x=>inqKey(x.status)==='deal');
-  const inqL=inq.filter(x=>inqKey(x.status)==='cancel');
-
   lapReport = { brand:f.brand, month:f.month, year, ag, agDone, agProg, agPlan, so, sp, prevM, bCur, bNext, nextM, inqQ, inqS, inqW, inqL };
-
-  // Adapter → kontrak buildInsight()
-  const insData = {
-    brand:f.brand, month:f.month, prevM, nextM, bCur, bNext, so, sp,
-    ag, agDone, agProg, agLabel: statusLabel,
-    inqAll:inq, inqQuo:inqQ, inqSamp:inqS, inqDeal:inqW, inqCancel:inqL,
-  };
 
   const opt=(arr,sel)=>arr.map(v=>`<option ${v===sel?'selected':''}>${v}</option>`).join('');
   const soRow=(lbl,c,p,pct)=>`<tr><td>${lbl}</td><td class="r num">${pct?p.toFixed(2)+'%':fmtNum(p)}</td><td class="r num">${pct?c.toFixed(2)+'%':fmtNum(c)}</td><td class="r">${dlt(c,p,pct)}</td></tr>`;
 
   $('#content').innerHTML = `
     <div class="toolbar">
-      <span class="lbl">Brand</span><select id="lBrand">${opt(BR,f.brand)}</select>
+      <span class="lbl">Brand</span><select id="lBrand">${opt([ALL_BRANDS].concat(BR),f.brand)}</select>
       <span class="lbl">Bulan</span><select id="lMonth">${opt(MONTHS,f.month)}</select>
       <span style="flex:1"></span>
       <button id="lPdf" class="tab">🖨️ PDF</button>
