@@ -144,6 +144,7 @@ let inqData = null;
 let finFilt = { brand:'(Semua)', from:'(Semua)', to:'(Semua)' };
 let finData = null;
 let finCardSort = 0; // 0=default, 1=asc, -1=desc (kolom Task/Card Rincian)
+let estOpen = false; // rincian Budget Estimasi per card (klik kartu Estimasi)
 let mktFilt = { brand:'Revolt Industry', month:'(Semua)' };
 let mktData = null;
 let agFilt = { brand:'(Semua)', bulan:'(Semua)' };
@@ -351,9 +352,23 @@ function renderFinance(){
   const opt=(arr,sel)=>arr.map(v=>`<option ${v===sel?'selected':''}>${v}</option>`).join('');
   const brandOpts=['(Semua)'].concat(BR), monthOpts=['(Semua)'].concat(MONTHS);
 
+  // Rincian Budget Estimasi per card (klik kartu Estimasi)
+  const estDet = (finData.estDetail||[]).filter(d =>
+    (f.brand==='(Semua)'||d.brand===f.brand) &&
+    (MONTHS.indexOf(d.month)>=fromIdx && MONTHS.indexOf(d.month)<=toIdx));
+  estDet.sort((a,b)=>(b.est||0)-(a.est||0));
+  const estDetTotal = estDet.reduce((s,d)=>s+(d.est||0),0);
+  const eRows = estDet.map(d=>
+    `<tr><td>${d.card||'—'}</td><td>${d.brand}</td><td><b>${d.month||'—'}</b></td><td class="muted">${d.list||'—'}</td><td class="r num">${fmtRp(d.est)}</td></tr>`
+  ).join('') || '<tr><td colspan="5" class="muted" style="text-align:center;padding:20px">Belum ada card dengan Estimated Budget untuk filter ini.</td></tr>';
+  const estPanel = !estOpen ? '' : `
+    <div class="section-title">🔎 Rincian Budget Estimasi — dari card mana saja</div>
+    <div class="muted" style="margin:-4px 0 10px;font-size:12px">Diambil dari <b>Estimated Budget:</b> di deskripsi tiap card Trello, dihitung di bulan card berakhir.</div>
+    <div class="tablewrap"><table><thead><tr><th>Card / Agenda</th><th>Brand</th><th>Bulan</th><th>List</th><th class="r">Estimasi</th></tr></thead><tbody>${eRows}<tr><td colspan="4" class="r"><b>Total</b></td><td class="r num"><b>${fmtRp(estDetTotal)}</b></td></tr></tbody></table></div>`;
+
   // KPI cards
   const cards = `
-    <div class="bcard"><h3>Budget Estimasi</h3><div class="big" style="font-size:22px">${fmtRp(est)}</div></div>
+    <div class="bcard" id="estCard" style="cursor:pointer" title="Klik untuk lihat rincian per card"><h3>Budget Estimasi ${estOpen?'▲':'▼'}</h3><div class="big" style="font-size:22px">${fmtRp(est)}</div><div class="biglbl" style="margin:4px 0 0">klik lihat rincian</div></div>
     <div class="bcard"><h3>Proyeksi (Checklist)</h3><div class="big" style="font-size:22px">${fmtRp(proj)}</div></div>
     <div class="bcard"><h3>Budget Aktual</h3><div class="big" style="font-size:22px">${fmtRp(act)}</div></div>
     <div class="bcard"><h3>Variance (Akt − Est / Proy)</h3><div class="big" style="font-size:16px;color:${vcol(vEst)}">${fmtRp(vEst)}</div>
@@ -407,6 +422,7 @@ function renderFinance(){
     <div class="section-title">📊 Ringkasan ${finData.year}</div>
     <div class="muted" style="margin:-4px 0 10px;font-size:12px"><b>Estimasi</b> = patokan awal (tetap) · <b>Proyeksi</b> = rencana terkini dari checklist (bisa berubah) · <b>Aktual</b> = realisasi. Estimasi dihitung di bulan card berakhir.</div>
     <div class="brandgrid">${cards}</div>
+    ${estPanel}
     <div class="section-title">🏢 Per Brand</div>
     <div class="tablewrap"><table><thead><tr><th>Brand</th><th class="r">Budget Est.</th><th class="r">Proyeksi</th><th class="r">Budget Aktual</th><th class="r">Var vs Est</th><th class="r">Var vs Proy</th><th class="r">Content</th><th class="r">Task</th><th class="r">Overdue</th></tr></thead><tbody>${bRows}</tbody></table></div>
     <div class="section-title">🧾 Rincian Pengeluaran (Proyeksi Checklist)</div>
@@ -417,6 +433,7 @@ function renderFinance(){
   $('#cFrom').onchange=e=>{f.from=e.target.value;renderFinance();};
   $('#cTo').onchange=e=>{f.to=e.target.value;renderFinance();};
   $('#thFinCard').onclick=()=>{ finCardSort = finCardSort===1 ? -1 : (finCardSort===-1 ? 0 : 1); renderFinance(); };
+  $('#estCard').onclick=()=>{ estOpen = !estOpen; renderFinance(); };
 }
 
 /* ===== MARKETING (rich, filter brand + bulan) ===== */
