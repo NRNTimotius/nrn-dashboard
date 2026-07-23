@@ -197,6 +197,38 @@ let finFilt = { brand:'(Semua)', from:'(Semua)', to:'(Semua)' };
 let finData = null;
 let finCardSort = 0; // 0=default, 1=asc, -1=desc (kolom Task/Card Rincian)
 let finOpen = ''; // panel rincian yg terbuka di Finance: '' | 'est' | 'proj' | 'act'
+// Cara menaruh Budget Estimasi ke dalam bulan:
+//   'akhir' = penuh di bulan card berakhir (default, sesuai keputusan awal)
+//   'sebar' = dibagi ke bulan-bulan item checklist-nya, supaya SEBANDING dgn Proyeksi
+let estMode = 'akhir';
+
+/* Peta Estimasi per "brand|bulan" sesuai cara hitung yang dipilih.
+   Dihitung di sisi web dari estDetail + detail — tidak perlu ubah Apps Script. */
+function hitungEstMap(mode){
+  const map={};
+  const add=(b,m,v)=>{ if(!m||!b) return; const k=b+'|'+m; map[k]=(map[k]||0)+v; };
+  if(mode!=='sebar'){
+    ((finData&&finData.rows)||[]).forEach(r=> add(r.brand, r.month, r.est||0));
+    return map;
+  }
+  // 'sebar': estimasi tiap card dibagi ke bulan tempat item checklist-nya jatuh,
+  // proporsional terhadap nominal tiap bulan (kalau nominalnya 0 → dibagi rata).
+  const itemsByCard={};
+  ((finData&&finData.detail)||[]).forEach(d=>{
+    const k=d.brand+'|'+d.card; (itemsByCard[k]=itemsByCard[k]||[]).push(d);
+  });
+  ((finData&&finData.estDetail)||[]).forEach(e=>{
+    const items=itemsByCard[e.brand+'|'+e.card]||[];
+    if(!items.length){ add(e.brand, e.month, e.est||0); return; } // tanpa checklist → tetap di bulan card
+    const perBulan={}; let total=0;
+    items.forEach(it=>{ if(!it.month) return; perBulan[it.month]=(perBulan[it.month]||0)+(it.nominal||0); total+=(it.nominal||0); });
+    const bulan=Object.keys(perBulan);
+    if(!bulan.length){ add(e.brand, e.month, e.est||0); return; }
+    if(total>0) bulan.forEach(m=> add(e.brand, m, (e.est||0)*perBulan[m]/total));
+    else        bulan.forEach(m=> add(e.brand, m, (e.est||0)/bulan.length));
+  });
+  return map;
+}
 let mktFilt = { brand:'Revolt Industry', month:'(Semua)' };
 let mktData = null;
 let agFilt = { brand:'(Semua)', bulan:'(Semua)' };
@@ -810,7 +842,22 @@ function renderFinance(){
     (MONTHS.indexOf(r.month)>=fromIdx && MONTHS.indexOf(r.month)<=toIdx));
 
   const sum = (arr,k)=>arr.reduce((s,x)=>s+(x[k]||0),0);
-  const est=sum(flt,'est'), proj=sum(flt,'proj'), act=sum(flt,'act');
+  // Estimasi diambil dari peta (ikut cara hitung terpilih), bukan langsung dari baris sheet
+  const estMap = hitungEstMap(estMode);
+  const estJumlah = (brandOnly, monthOnly) => {
+    let s=0;
+    Object.keys(estMap).forEach(k=>{
+      const pos=k.lastIndexOf('|'), b=k.slice(0,pos), m=k.slice(pos+1);
+      if(f.brand!=='(Semua)' && b!==f.brand) return;
+      if(brandOnly && b!==brandOnly) return;
+      if(monthOnly && m!==monthOnly) return;
+      const mi=MONTHS.indexOf(m);
+      if(mi<fromIdx || mi>toIdx) return;
+      s+=estMap[k];
+    });
+    return Math.round(s);
+  };
+  const est=estJumlah(), proj=sum(flt,'proj'), act=sum(flt,'act');
   const vEst=act-est, vProj=act-proj;
   const task=sum(flt,'taskCount'), done=sum(flt,'doneCount'), ovd=sum(flt,'overdueCount');
   const vcol=v=>v<=0?'var(--green4)':'var(--red)';
@@ -892,6 +939,7 @@ function renderFinance(){
     act:  'Uang yang <b>benar-benar keluar</b> (realisasi). Sumber: kolom Budget Aktual di Google Sheets, diisi manual oleh tim. Klik kartu untuk lihat brand/bulan mana yang sudah & belum terisi.',
     vEst: 'Aktual dibandingkan <b>patokan awal</b>. Menjawab: realisasi meleset berapa jauh dari estimasi yang dibuat di awal?',
     vProj:'Aktual dibandingkan <b>rencana terkini</b>. Menjawab: belanja sesuai rencana terakhir atau tidak? Ini yang paling relevan untuk kontrol bulan berjalan.',
+    mode: '<b>Bulan card berakhir</b>: seluruh estimasi card ditaruh di bulan due-date-nya — mudah dilacak, tapi <b>tidak sebanding</b> dgn Proyeksi yang tersebar per item.<br><br><b>Ikut sebaran checklist</b>: estimasi dibagi ke bulan-bulan item checklist-nya, jadi sebanding dgn Proyeksi. Total setahun sama saja.',
   };
   // Kartu selisih: pakai kata, bukan cuma angka minus. Kalau aktual belum ada,
   // sengaja NETRAL (bukan hijau) supaya tidak terbaca "hemat" padahal cuma belum dicatat.
@@ -973,11 +1021,21 @@ function renderFinance(){
       <tbody>${pRowsPecah}</tbody></table></div>
     <div class="ins-foot">Diurutkan: yang paling perlu diperbaiki di atas. <b>Sisa</b> = bagian estimasi yang belum dituangkan jadi item checklist. Rincian tiap item ada di tabel <b>Rincian Pengeluaran</b> di bawah.</div>`;
 
+  // Peringatan: dalam mode 'akhir', Est & Proyeksi per bulan TIDAK sebanding.
+  const modeNote = estMode==='akhir'
+    ? `<div class="note" style="margin:-4px 0 8px;font-size:12px;background:var(--gold-bg);border:1px solid #e8d49a;border-radius:8px;padding:8px 10px;color:var(--text2)">
+         ⚠️ <b>Kolom "Selisih vs Est." di tabel ini belum sebanding.</b> Estimasi sedang dihitung <b>penuh di bulan card berakhir</b>,
+         sedangkan Proyeksi tersebar mengikuti deadline tiap item checklist. Jadi card yang berakhir bulan X tapi checklist-nya
+         tersebar beberapa bulan akan terlihat "selisih besar" di bulan X — padahal bisa jadi sudah dirinci lengkap.<br>
+         Ganti <b>Estimasi per bulan → “Ikut sebaran checklist”</b> di kanan atas supaya sebanding, atau lihat perbandingan
+         yang jujur per card di tabel <b>🧩 Pecahan Estimasi</b> di atas.</div>`
+    : `<div class="note" style="margin:-4px 0 8px;font-size:12px">Estimasi dibagi ke bulan-bulan item checklist-nya (proporsional terhadap nominal), jadi <b>sebanding</b> dengan Proyeksi. Total setahun tetap sama.</div>`;
+
   // Per brand table
   const brandsToShow = f.brand==='(Semua)' ? BR : [f.brand];
   const bRows = brandsToShow.map(b=>{
     const br = flt.filter(r=>r.brand===b);
-    const e=sum(br,'est'), p=sum(br,'proj'), a=sum(br,'act');
+    const e=estJumlah(b), p=sum(br,'proj'), a=sum(br,'act');
     return `<tr><td><b>${b}</b></td><td class="r num">${e?fmtRp(e):'<span class="lap-na">belum diisi</span>'}</td><td class="r num">${p?fmtRp(p):'<span class="lap-na">belum ada</span>'}</td><td class="r num">${a?fmtRp(a):'<span class="lap-na">belum terupdate</span>'}</td>
       <td class="r num">${vCell(a,e)}</td>
       <td class="r num">${vCell(a,p)}</td>
@@ -990,7 +1048,7 @@ function renderFinance(){
   flt.forEach(r=>{ (byMonth[r.month]=byMonth[r.month]||[]).push(r); });
   const mRows = Object.keys(byMonth).sort((a,b)=>MONTHS.indexOf(a)-MONTHS.indexOf(b)).map(m=>{
     const mr=byMonth[m];
-    const e=sum(mr,'est'), p=sum(mr,'proj'), a=sum(mr,'act');
+    const e=estJumlah(null,m), p=sum(mr,'proj'), a=sum(mr,'act');
     return `<tr><td><b>${m}</b></td><td class="r num">${e?fmtRp(e):'<span class="lap-na">belum diisi</span>'}</td><td class="r num">${p?fmtRp(p):'<span class="lap-na">belum ada</span>'}</td><td class="r num">${a?fmtRp(a):'<span class="lap-na">belum terupdate</span>'}</td>
       <td class="r num">${vCell(a,e)}</td>
       <td class="r num">${vCell(a,p)}</td>
@@ -1030,6 +1088,12 @@ function renderFinance(){
       <span class="lbl">Brand</span><select id="cBrand">${opt(brandOpts,f.brand)}</select>
       <span class="lbl">Dari</span><select id="cFrom">${opt(monthOpts,f.from)}</select>
       <span class="lbl">Sampai</span><select id="cTo">${opt(monthOpts,f.to)}</select>
+      <span style="flex:1"></span>
+      <span class="lbl">Estimasi per bulan ${infoIcon(TIP.mode)}</span>
+      <select id="cEstMode">
+        <option value="akhir"${estMode==='akhir'?' selected':''}>Bulan card berakhir</option>
+        <option value="sebar"${estMode==='sebar'?' selected':''}>Ikut sebaran checklist</option>
+      </select>
     </div>
     <div class="section-title">📊 Ringkasan ${finData.year}</div>
     <div class="muted" style="margin:-4px 0 10px;font-size:12px">Arahkan ke ikon <span class="info" tabindex="0">i</span> di tiap kartu untuk tahu arti &amp; sumber angkanya · klik kartu untuk lihat rinciannya.</div>
@@ -1041,10 +1105,12 @@ function renderFinance(){
     <div class="section-title">🧾 Rincian Pengeluaran (Proyeksi Checklist)</div>
     <div class="tablewrap"><table><thead><tr><th>Bulan</th><th>Brand</th><th id="thFinCard" style="cursor:pointer;user-select:none">Task / Card <span style="opacity:.6">${finCardArrow}</span></th><th>Checklist</th><th>Tanggal</th><th class="r">Nominal</th></tr></thead><tbody>${dRows}<tr><td colspan="5" class="r"><b>Total</b></td><td class="r num"><b>${fmtRp(detailTotal)}</b></td></tr></tbody></table></div>
     <div class="section-title">📅 Per Bulan</div>
+    ${modeNote}
     <div class="tablewrap"><table><thead><tr><th>Bulan</th><th class="r">Budget Est.</th><th class="r">Proyeksi</th><th class="r">Budget Aktual</th><th class="r">Selisih vs Est.</th><th class="r">Selisih vs Proy.</th><th class="r">Content</th><th class="r">Task</th></tr></thead><tbody>${mRows}</tbody></table></div>`;
   $('#cBrand').onchange=e=>{f.brand=e.target.value;renderFinance();};
   $('#cFrom').onchange=e=>{f.from=e.target.value;renderFinance();};
   $('#cTo').onchange=e=>{f.to=e.target.value;renderFinance();};
+  $('#cEstMode').onchange=e=>{estMode=e.target.value;renderFinance();};
   $('#thFinCard').onclick=()=>{ finCardSort = finCardSort===1 ? -1 : (finCardSort===-1 ? 0 : 1); renderFinance(); };
   // Klik kartu = buka/tutup panel rinciannya (satu panel terbuka pada satu waktu)
   ['est','proj','act'].forEach(id=>{
